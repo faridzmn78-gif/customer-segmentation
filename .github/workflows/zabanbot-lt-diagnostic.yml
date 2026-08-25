@@ -1,0 +1,68 @@
+name: zabanbot-lt-diagnostic
+
+on:
+  push:
+    branches:
+      - tmp/zabanbot-dictionary-v07-source
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run LanguageTool German morphology diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lt/src/main/java
+          LT_VERSION=$(python3 - <<'PY'
+          import urllib.request, xml.etree.ElementTree as ET
+          data=urllib.request.urlopen('https://repo.maven.apache.org/maven2/org/languagetool/language-de/maven-metadata.xml').read()
+          root=ET.fromstring(data)
+          print(root.findtext('./versioning/release') or root.findtext('./versioning/latest'))
+          PY
+          )
+          echo "LT_VERSION=$LT_VERSION"
+          cat > lt/pom.xml <<EOF
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>tmp</groupId><artifactId>lt-diag</artifactId><version>1</version>
+            <properties><maven.compiler.release>17</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>
+            <dependencies><dependency><groupId>org.languagetool</groupId><artifactId>language-de</artifactId><version>${LT_VERSION}</version></dependency></dependencies>
+            <build><plugins><plugin><groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><version>3.5.0</version></plugin></plugins></build>
+          </project>
+          EOF
+          cat > lt/src/main/java/Diag.java <<'JAVA'
+          import java.util.*;
+          import org.languagetool.*;
+          import org.languagetool.tagging.de.GermanTagger;
+          import org.languagetool.synthesis.GermanSynthesizer;
+          public class Diag {
+            public static void main(String[] args) throws Exception {
+              GermanTagger t=new GermanTagger();
+              GermanSynthesizer s=GermanSynthesizer.INSTANCE;
+              String[] words={"fahren","gehen","machen","aufstehen","sein","haben","werden","bekommen"};
+              String[] patterns={"VER:1:SIN:PRÄ.*","VER:2:SIN:PRÄ.*","VER:3:SIN:PRÄ.*","VER:1:PLU:PRÄ.*","VER:2:PLU:PRÄ.*","VER:3:PLU:PRÄ.*","VER:1:SIN:PRT.*","VER:2:SIN:PRT.*","VER:3:SIN:PRT.*","VER:1:PLU:PRT.*","VER:2:PLU:PRT.*","VER:3:PLU:PRT.*","VER:INF.*","VER:IMP.*",".*PA2.*VER.*","VER.*PA2.*"};
+              for(String w:words){
+                System.out.println("WORD\t"+w);
+                AnalyzedTokenReadings rr=t.lookup(w);
+                System.out.println("LOOKUP\t"+String.valueOf(rr));
+                for(String p:patterns){
+                  String[] x=s.synthesize(new AnalyzedToken(w,"VER:INF:NON",w),p,true);
+                  System.out.println("SYN\t"+p+"\t"+Arrays.toString(x));
+                }
+              }
+            }
+          }
+          JAVA
+          cd lt
+          mvn -q -DskipTests compile exec:java -Dexec.mainClass=Diag | tee ../lt-diagnostic.txt
+      - name: Upload diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: zabanbot-lt-diagnostic
+          path: lt-diagnostic.txt
+          retention-days: 1
