@@ -1,0 +1,125 @@
+name: zabanbot-lt-core-verb-scan
+
+on:
+  push:
+    branches:
+      - tmp/zabanbot-dictionary-v07-source
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reproduce Pyphen core candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install -q pyphen==0.17.2
+          python3 - <<'PY'
+          import pyphen, pathlib, re
+          p=pathlib.Path(pyphen.__file__).resolve().parent/'dictionaries'/'hyph_de_DE.dic'
+          raw=p.read_text(encoding='latin1',errors='ignore').splitlines()[:69000]
+          allow2={'ab','am','an','da','du','er','es','im','in','ja','je','so','um','zu'}
+          entries=set()
+          for line in raw:
+              s=line.strip()
+              if not s or s.startswith('#') or s.startswith(('COMPOUND','ISO','NEXTLEVEL')): continue
+              if any(ch in s for ch in '/='): continue
+              w=re.sub(r'\d','',s).replace('.','').strip().lower()
+              if not re.fullmatch(r'[a-zäöüßéèêëáàâç-]+',w): continue
+              if len(w)<3 and w not in allow2: continue
+              if len(w)>28: continue
+              entries.add(w)
+          candidates=sorted(w for w in entries if w.endswith(('en','eln','ern')) or w in {'sein','tun'})
+          pathlib.Path('candidates.txt').write_text('\n'.join(candidates)+'\n',encoding='utf-8')
+          pathlib.Path('candidate_qa.txt').write_text(f'entries={len(entries)}\ncandidates={len(candidates)}\n',encoding='utf-8')
+          print('entries',len(entries),'candidates',len(candidates))
+          PY
+      - name: Scan candidates with LanguageTool tagger and synthesizer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lt/src/main/java out
+          LT_VERSION=$(python3 - <<'PY'
+          import urllib.request, xml.etree.ElementTree as ET
+          data=urllib.request.urlopen('https://repo.maven.apache.org/maven2/org/languagetool/language-de/maven-metadata.xml').read()
+          root=ET.fromstring(data)
+          print(root.findtext('./versioning/release') or root.findtext('./versioning/latest'))
+          PY
+          )
+          echo "$LT_VERSION" > out/languagetool_version.txt
+          cat > lt/pom.xml <<EOF
+          <project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>
+          <groupId>tmp</groupId><artifactId>lt-scan</artifactId><version>1</version>
+          <properties><maven.compiler.release>17</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>
+          <dependencies><dependency><groupId>org.languagetool</groupId><artifactId>language-de</artifactId><version>${LT_VERSION}</version></dependency></dependencies>
+          <build><plugins><plugin><groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><version>3.5.0</version></plugin></plugins></build></project>
+          EOF
+          cat > lt/src/main/java/Scan.java <<'JAVA'
+          import java.nio.file.*;
+          import java.util.*;
+          import org.languagetool.*;
+          import org.languagetool.tagging.de.GermanTagger;
+          import org.languagetool.synthesis.GermanSynthesizer;
+          public class Scan {
+            static String esc(String s){ if(s==null)return ""; return s.replace("\\","\\\\").replace("\t","\\t").replace("\n","\\n").replace("\r",""); }
+            static String first(String[] a){ if(a==null||a.length==0)return ""; LinkedHashSet<String> s=new LinkedHashSet<>(); for(String x:a) if(x!=null&&!x.isBlank())s.add(x); return s.isEmpty()?"":s.iterator().next(); }
+            static String list(String[] a){ if(a==null||a.length==0)return ""; LinkedHashSet<String> s=new LinkedHashSet<>(); for(String x:a) if(x!=null&&!x.isBlank())s.add(x); return String.join("|",s); }
+            static String syn(GermanSynthesizer s,String w,String p) throws Exception { return first(s.synthesize(new AnalyzedToken(w,"VER:INF:NON",w),p,true)); }
+            static String synList(GermanSynthesizer s,String w,String p) throws Exception { return list(s.synthesize(new AnalyzedToken(w,"VER:INF:NON",w),p,true)); }
+            public static void main(String[] args) throws Exception {
+              GermanTagger tagger=new GermanTagger(); GermanSynthesizer synth=GermanSynthesizer.INSTANCE;
+              List<String> words=Files.readAllLines(Path.of("../candidates.txt"));
+              StringBuilder out=new StringBuilder(); int matched=0,errors=0;
+              for(String w:words){
+                try{
+                  AnalyzedTokenReadings rr=tagger.lookup(w); if(rr==null)continue;
+                  boolean inf=false,neb=false; StringBuilder tags=new StringBuilder();
+                  for(AnalyzedToken a:rr){ String p=a.getPOSTag(); String l=a.getLemma(); if(p!=null){ if(tags.length()>0)tags.append('|'); tags.append(p); if(p.startsWith("VER:INF") && w.equalsIgnoreCase(l))inf=true; if(p.contains(":NEB"))neb=true; } }
+                  if(!inf)continue; matched++;
+                  String[] f=new String[]{
+                    w, neb?"1":"0",
+                    syn(synth,w,"VER:1:SIN:PRÄ.*"),syn(synth,w,"VER:2:SIN:PRÄ.*"),syn(synth,w,"VER:3:SIN:PRÄ.*"),
+                    syn(synth,w,"VER:1:PLU:PRÄ.*"),syn(synth,w,"VER:2:PLU:PRÄ.*"),syn(synth,w,"VER:3:PLU:PRÄ.*"),
+                    syn(synth,w,"VER:1:SIN:PRT.*"),syn(synth,w,"VER:2:SIN:PRT.*"),syn(synth,w,"VER:3:SIN:PRT.*"),
+                    syn(synth,w,"VER:1:PLU:PRT.*"),syn(synth,w,"VER:2:PLU:PRT.*"),syn(synth,w,"VER:3:PLU:PRT.*"),
+                    synList(synth,w,"VER.*PA2.*"),synList(synth,w,"VER:IMP:SIN.*"),synList(synth,w,"VER:IMP:PLU.*"),esc(tags.toString())
+                  };
+                  for(int i=0;i<f.length;i++){ if(i>0)out.append('\t'); out.append(esc(f[i])); } out.append('\n');
+                }catch(Exception e){errors++;}
+              }
+              Files.writeString(Path.of("../lt_core_verbs.tsv"),out.toString());
+              Files.writeString(Path.of("../lt_scan_counts.txt"),"matched="+matched+"\nerrors="+errors+"\n");
+              System.out.println("matched="+matched+" errors="+errors);
+            }
+          }
+          JAVA
+          cd lt
+          mvn -q -DskipTests compile exec:java -Dexec.mainClass=Scan
+          cd ..
+          python3 - <<'PY'
+          import gzip,json,pathlib
+          cols=['inf','separable_tag','pr1','pr2','pr3','pr4','pr5','pr6','pt1','pt2','pt3','pt4','pt5','pt6','p2_variants','imp_sg_variants','imp_pl_variants','tags']
+          rows=[]
+          for line in pathlib.Path('lt_core_verbs.tsv').read_text(encoding='utf-8').splitlines():
+              vals=line.split('\t');
+              if len(vals)!=len(cols): continue
+              r=dict(zip(cols,vals)); r['r']='ltv'; rows.append(r)
+          with gzip.GzipFile('out/lt_core_verbs.jsonl.gz','wb',compresslevel=9,mtime=0) as gz:
+              for r in rows: gz.write((json.dumps(r,ensure_ascii=False,separators=(',',':'))+'\n').encode())
+          counts=dict(x.split('=',1) for x in pathlib.Path('lt_scan_counts.txt').read_text().splitlines() if '=' in x)
+          qa={'language_tool_version':pathlib.Path('out/languagetool_version.txt').read_text().strip(),'matched_rows':len(rows),'java_counts':counts,'status':'PASS' if len(rows)>1000 else 'FAIL'}
+          pathlib.Path('out/lt_core_verbs_qa.json').write_text(json.dumps(qa,indent=2,ensure_ascii=False),encoding='utf-8')
+          print(json.dumps(qa,ensure_ascii=False))
+          if qa['status']!='PASS': raise SystemExit('LanguageTool scan too small')
+          PY
+      - name: Upload LT scan
+        uses: actions/upload-artifact@v4
+        with:
+          name: zabanbot-lt-core-verb-scan
+          path: out/*
+          retention-days: 1
+          if-no-files-found: error
