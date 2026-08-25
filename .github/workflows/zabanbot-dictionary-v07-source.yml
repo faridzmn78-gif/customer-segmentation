@@ -1,0 +1,103 @@
+name: zabanbot-dictionary-v07-source
+
+on:
+  push:
+    branches:
+      - tmp/zabanbot-dictionary-v07-source
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and normalize German verb source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import csv, gzip, hashlib, io, json, re, unicodedata, urllib.request
+          from pathlib import Path
+
+          URL = 'https://raw.githubusercontent.com/viorelsfetea/german-verbs-database/master/output/verbs.csv'
+          EXPECTED = ['Infinitive','Präsens_ich','Präsens_du','Präsens_er/sie/es','Präteritum_ich','Partizip II','Konjunktiv II_ich','Imperativ Singular','Imperativ Plural','Hilfsverb']
+          raw = urllib.request.urlopen(URL, timeout=60).read()
+          sha = hashlib.sha256(raw).hexdigest()
+          text = raw.decode('utf-8-sig')
+          reader = csv.DictReader(io.StringIO(text))
+          if reader.fieldnames != EXPECTED:
+              raise SystemExit(f'Unexpected header: {reader.fieldnames!r}')
+
+          def clean(v):
+              v = unicodedata.normalize('NFKC', (v or '').strip())
+              if v in {'', '—', '-', '–', 'null', 'None'}:
+                  return None
+              return re.sub(r'\s+', ' ', v)
+
+          rows = []
+          rejected = []
+          seen = {}
+          duplicate_rows = []
+          for line_no, row in enumerate(reader, start=2):
+              out = {
+                  'inf': clean(row['Infinitive']),
+                  'pr1': clean(row['Präsens_ich']),
+                  'pr2': clean(row['Präsens_du']),
+                  'pr3': clean(row['Präsens_er/sie/es']),
+                  'pt1': clean(row['Präteritum_ich']),
+                  'p2': clean(row['Partizip II']),
+                  'k2_1': clean(row['Konjunktiv II_ich']),
+                  'imp_sg': clean(row['Imperativ Singular']),
+                  'imp_pl': clean(row['Imperativ Plural']),
+                  'aux': clean(row['Hilfsverb']),
+                  'source_line': line_no,
+              }
+              inf = out['inf']
+              if not inf or not re.search(r'[A-Za-zÄÖÜäöüß]', inf):
+                  rejected.append({'line': line_no, 'reason':'bad_infinitive', 'row': out})
+                  continue
+              # Require at least principal-parts evidence; rows missing too much are review-only/rejected.
+              evidence = sum(bool(out[k]) for k in ('pr1','pr2','pr3','pt1','p2','aux'))
+              if evidence < 3:
+                  rejected.append({'line': line_no, 'reason':'insufficient_morphology', 'row': out})
+                  continue
+              key = unicodedata.normalize('NFKC', inf).casefold()
+              if key in seen:
+                  duplicate_rows.append({'key':key,'first_line':seen[key],'duplicate_line':line_no})
+              else:
+                  seen[key] = line_no
+              out['r'] = 'vsrc'
+              rows.append(out)
+
+          Path('out/verbs_source_raw_sha256.txt').write_text(sha+'  verbs.csv\n', encoding='utf-8')
+          with gzip.GzipFile('out/verbs_source_8048.jsonl.gz','wb',compresslevel=9,mtime=0) as gz:
+              for r in rows:
+                  gz.write((json.dumps(r,ensure_ascii=False,separators=(',',':'))+'\n').encode('utf-8'))
+          qa = {
+              'source_url': URL,
+              'raw_bytes': len(raw),
+              'raw_sha256': sha,
+              'header': reader.fieldnames,
+              'accepted_rows': len(rows),
+              'rejected_rows': len(rejected),
+              'unique_infinitive_keys': len(seen),
+              'duplicate_rows': len(duplicate_rows),
+              'duplicates_sample': duplicate_rows[:100],
+              'rejected_sample': rejected[:100],
+              'status': 'PASS' if len(rows) >= 8000 else 'FAIL'
+          }
+          Path('out/verbs_source_qa.json').write_text(json.dumps(qa,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(qa,ensure_ascii=False))
+          if qa['status'] != 'PASS':
+              raise SystemExit('Too few accepted rows')
+          PY
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zabanbot-verbs-source
+          path: out/*
+          if-no-files-found: error
+          retention-days: 1
