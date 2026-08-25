@@ -23,7 +23,7 @@ jobs:
           from pathlib import Path
 
           URL = 'https://raw.githubusercontent.com/viorelsfetea/german-verbs-database/master/output/verbs.csv'
-          EXPECTED = ['Infinitive','Präsens_ich','Präsens_du','Präsens_er/sie/es','Präteritum_ich','Partizip II','Konjunktiv II_ich','Imperativ Singular','Imperativ Plural','Hilfsverb']
+          EXPECTED = ['Infinitive','Präsens_ich','Präsens_du','Präsens_er, sie, es','Präteritum_ich','Partizip II','Konjunktiv II_ich','Imperativ Singular','Imperativ Plural','Hilfsverb']
           raw = urllib.request.urlopen(URL, timeout=60).read()
           sha = hashlib.sha256(raw).hexdigest()
           text = raw.decode('utf-8-sig')
@@ -46,7 +46,7 @@ jobs:
                   'inf': clean(row['Infinitive']),
                   'pr1': clean(row['Präsens_ich']),
                   'pr2': clean(row['Präsens_du']),
-                  'pr3': clean(row['Präsens_er/sie/es']),
+                  'pr3': clean(row['Präsens_er, sie, es']),
                   'pt1': clean(row['Präteritum_ich']),
                   'p2': clean(row['Partizip II']),
                   'k2_1': clean(row['Konjunktiv II_ich']),
@@ -59,7 +59,6 @@ jobs:
               if not inf or not re.search(r'[A-Za-zÄÖÜäöüß]', inf):
                   rejected.append({'line': line_no, 'reason':'bad_infinitive', 'row': out})
                   continue
-              # Require at least principal-parts evidence; rows missing too much are review-only/rejected.
               evidence = sum(bool(out[k]) for k in ('pr1','pr2','pr3','pt1','p2','aux'))
               if evidence < 3:
                   rejected.append({'line': line_no, 'reason':'insufficient_morphology', 'row': out})
